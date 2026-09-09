@@ -59,7 +59,65 @@ export async function prepareSshContext(profile: SshProjectBootstrap, signal?: A
 	return documents.join("\n\n");
 }
 
-export function createSshProjectTools(profile: SshProjectBootstrap): ToolDefinition[] {
+function resolveBoundRemoteFile(projectDir: string, raw: string): string {
+	if (!raw || /[\u0000-\u001f\u007f]/u.test(raw)) throw new Error("Invalid remote path.");
+	const root = path.posix.resolve(projectDir);
+	const file = path.posix.resolve(root, raw);
+	if (file === root || !file.startsWith(`${root}/`)) throw new Error("Remote path is outside the bound project.");
+	return file;
+}
+
+function remoteWriteScript(file: string, encoded: string): string {
+	return [
+		"set -eu",
+		"root=$(pwd -P)",
+		"inside() { case \"$1\" in \"$root\"|\"$root\"/*) ;; *) echo \"Remote path is outside the bound project.\" >&2; exit 1 ;; esac; }",
+		`file=${sshQuote(file)}`,
+		"base=$(basename -- \"$file\")",
+		"case \"$base\" in \"\"|\".\"|\"..\") echo \"Invalid remote path.\" >&2; exit 1 ;; esac",
+		"orig=$(dirname -- \"$file\")",
+		"exist=$orig",
+		"while [ ! -e \"$exist\" ] && [ ! -L \"$exist\" ]; do nxt=$(dirname -- \"$exist\"); test \"$nxt\" != \"$exist\"; exist=$nxt; done",
+		"cd -- \"$exist\"",
+		"phys=$(pwd -P)",
+		"inside \"$phys\"",
+		"if [ \"$exist\" != \"$orig\" ]; then",
+		"rest=${orig#\"$exist\"/}",
+		"while [ -n \"$rest\" ]; do",
+		"case \"$rest\" in */*) comp=${rest%%/*}; rest=${rest#*/} ;; *) comp=$rest; rest= ;; esac",
+		"case \"$comp\" in \"\"|\".\"|\"..\") echo \"Invalid remote path.\" >&2; exit 1 ;; esac",
+		"if [ -L \"./$comp\" ]; then echo \"Remote path is outside the bound project.\" >&2; exit 1; fi",
+		"if [ ! -e \"./$comp\" ]; then mkdir -- \"./$comp\"; elif [ ! -d \"./$comp\" ]; then echo \"Remote path is outside the bound project.\" >&2; exit 1; fi",
+		"cd -- \"./$comp\"",
+		"phys=$(pwd -P)",
+		"inside \"$phys\"",
+		"done",
+		"fi",
+		"dest=$(pwd -P)",
+		"inside \"$dest\"",
+		"if [ -L \"./$base\" ] || [ -d \"./$base\" ]; then echo \"Remote path is outside the bound project.\" >&2; exit 1; fi",
+		"if dd if=/dev/null of=/dev/null bs=1 count=0 oflag=nofollow 2>/dev/null; then nofollow=1; else nofollow=; fi",
+		`if [ -n "$nofollow" ]; then printf '%s' ${sshQuote(encoded)} | base64 -d | dd of="./$base" oflag=nofollow 2>/dev/null; else`,
+		"n=0; box=",
+		"while [ \"$n\" -lt 32 ]; do n=$((n+1)); cand=./.pi-ssh-w-$$-$n; if mkdir -- \"$cand\" 2>/dev/null; then box=$cand; break; fi; done",
+		"test -n \"$box\"",
+		"cd -- \"$box\"",
+		"inside \"$(pwd -P)\"",
+		"set -C",
+		`printf '%s' ${sshQuote(encoded)} | base64 -d > ./p`,
+		"set +C",
+		"test -f \"./p\" && test ! -L \"./p\"",
+		"ok=",
+		"if mv -T -- \"./p\" \"../$base\" 2>/dev/null; then ok=1; elif ln -fh -- \"./p\" \"../$base\" 2>/dev/null; then ok=1; elif ln -fn -- \"./p\" \"../$base\" 2>/dev/null; then ok=1; fi",
+		"cd -- ..",
+		"rm -rf -- \"$box\"",
+		"test -n \"$ok\"",
+		"fi",
+		"test -f \"./$base\" && test ! -L \"./$base\"",
+	].join("\n");
+}
+
+export function createSshProjectTools(profile: SshProjectBootstrap, selectedTools?: readonly string[]): ToolDefinition[] {
 	const read: ToolDefinition = {
 		name: "read", label: "read", description: "Read bounded remote UTF-8 text, or an explicitly selected local Markdown snapshot with scope=local-resource.",
 		promptSnippet: "Read remote project text; selected local Markdown requires scope=local-resource and its exact selected path.",
@@ -103,5 +161,20 @@ export function createSshProjectTools(profile: SshProjectBootstrap): ToolDefinit
 			};
 		},
 	};
-	return [read, bash];
+	const write: ToolDefinition = {
+		name: "write", label: "write", description: "Write bounded remote UTF-8 text in the bound SSH project. Creates the file if needed and overwrites if it exists.",
+		promptSnippet: "Write remote project text only; no local filesystem fallback.",
+		parameters: Type.Object({ path: Type.String(), content: Type.String(), scope: Type.Optional(Type.String()) }),
+		async execute(_id, raw, signal) {
+			const args = raw as { path: string; content: string; scope?: string };
+			if (args.scope !== undefined && args.scope !== "project") throw new Error("Unsupported write scope.");
+			if (typeof args.content !== "string" || args.content.includes("\0")) throw new Error("Remote binary/image writes are unsupported.");
+			const bytes = Buffer.from(args.content, "utf8");
+			if (bytes.length > 262144) throw new Error("Remote text write exceeds 256 KiB.");
+			const file = resolveBoundRemoteFile(profile.projectDir, args.path);
+			await runSshProject(profile, remoteWriteScript(file, bytes.toString("base64")), signal);
+			return { content: [{ type: "text", text: `Wrote ${bytes.length} bytes to ${file}` }], details: { path: file, bytes: bytes.length } };
+		},
+	};
+	return selectedTools?.includes("write") ? [read, bash, write] : [read, bash];
 }

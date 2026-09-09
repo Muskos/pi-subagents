@@ -7,6 +7,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { syncBuiltinESMExports } from "node:module";
+import { loadSelectedAgentDocument } from "../../src/agents/agents.ts";
 import { createSshProjectTools, prepareSshContext, runSshProject, sshQuote } from "../../src/runs/shared/ssh-project-tools.ts";
 import { snapshotSshProjectBootstrap } from "../../src/runs/shared/ssh-project-bootstrap.ts";
 
@@ -38,11 +39,181 @@ test("SSH public tool operations: quoting, selected documents, errors, cancellat
 		assert(invocations[0]!.script.includes("'\\''")); assert(invocations[0]!.args.includes("ForwardAgent=no")); assert(invocations[0]!.args.includes("SendEnv=-*"));
 		code = 255; await assert.rejects(() => runSshProject(profile, "exit 1"), /no local fallback/);
 		code = 0; output = "x".repeat(512 * 1024 + 1); await assert.rejects(() => runSshProject(profile, "large"), /limit.*uncertain/su); assert(killed);
-		output = "/AGENTS.md\n\n"; await prepareSshContext(profile); // empty context document is present, not malformed
+		output = "/AGENTS.md\n\n"; await prepareSshContext(profile);
 		hang = true; const controller = new AbortController(); const pending = runSshProject(profile, "hang", controller.signal); controller.abort();
 		await assert.rejects(() => pending, /remote descendants\/completion may be uncertain/);
 		await assert.rejects(() => runSshProject(profile, "timeout", undefined, 5), /deadline.*uncertain/su);
 	} finally { cp.spawn = original; syncBuiltinESMExports(); }
+});
+
+test("SSH write is omitted unless the bound agent selects it", () => {
+	assert.deepEqual(createSshProjectTools(profile).map(tool => tool.name), ["read", "bash"]);
+	assert.deepEqual(createSshProjectTools(profile, ["read", "bash"]).map(tool => tool.name), ["read", "bash"]);
+	assert.deepEqual(createSshProjectTools(profile, ["read", "write"]).map(tool => tool.name), ["read", "bash", "write"]);
+});
+
+test("SSH selected agent may list write and still refuses edit", () => {
+	const agent = (tools: string) => `---\nname: ssh-worker\ndescription: SSH worker\ntools: ${tools}\nasync: false\ndefaultContext: fresh\nsystemPromptMode: append\n---\nBody`;
+	assert.deepEqual(loadSelectedAgentDocument({ path: `${process.cwd()}/agent.md`, content: agent("read,bash") }).tools, ["read", "bash"]);
+	assert.deepEqual(loadSelectedAgentDocument({ path: `${process.cwd()}/agent.md`, content: agent("read,write") }).tools, ["read", "write"]);
+	assert.throws(() => loadSelectedAgentDocument({ path: `${process.cwd()}/agent.md`, content: agent("read,edit") }), /unsupported execution capabilities/);
+});
+
+test("SSH write rejects unsafe scope and path before transport and never touches the local project", async () => {
+	const localRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ssh-write-local-"));
+	const original = cp.spawn;
+	const invocations: unknown[] = [];
+	cp.spawn = ((command: string, args: readonly string[], options: unknown) => {
+		invocations.push({ command, args, options });
+		throw new Error("transport must not start");
+	}) as typeof cp.spawn;
+	syncBuiltinESMExports();
+	try {
+		fs.writeFileSync(path.join(localRoot, "canary.txt"), "LOCAL");
+		const write = createSshProjectTools(profile, ["write"]).find(tool => tool.name === "write")!;
+		await assert.rejects(() => write.execute("scope", { path: "ok.txt", content: "x", scope: "local-resource" }, undefined, undefined, {} as never), /Unsupported write scope/);
+		await assert.rejects(() => write.execute("abs", { path: "/etc/passwd", content: "x" }, undefined, undefined, {} as never), /outside the bound project/);
+		await assert.rejects(() => write.execute("escape", { path: "../secret", content: "x" }, undefined, undefined, {} as never), /outside the bound project/);
+		await assert.rejects(() => write.execute("root", { path: ".", content: "x" }, undefined, undefined, {} as never), /outside the bound project/);
+		await assert.rejects(() => write.execute("empty", { path: "", content: "x" }, undefined, undefined, {} as never), /Invalid remote path/);
+		await assert.rejects(() => write.execute("ctrl", { path: "a\nb", content: "x" }, undefined, undefined, {} as never), /Invalid remote path/);
+		await assert.rejects(() => write.execute("bin", { path: "ok.txt", content: "a\0b" }, undefined, undefined, {} as never), /binary/);
+		assert.deepEqual(invocations, []);
+		assert.deepEqual(fs.readdirSync(localRoot), ["canary.txt"]);
+		assert.equal(fs.readFileSync(path.join(localRoot, "canary.txt"), "utf8"), "LOCAL");
+	} finally { cp.spawn = original; syncBuiltinESMExports(); fs.rmSync(localRoot, { recursive: true, force: true }); }
+});
+
+test("SSH write sends exact remote path and bytes, overwrites, and fails closed", async () => {
+	const localRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ssh-write-cwd-"));
+	const original = cp.spawn;
+	const invocations: Array<{ command: string; args: readonly string[]; options: unknown; script: string }> = [];
+	let code: number | null = 0, hang = false, killed = false;
+	cp.spawn = ((command: string, args: readonly string[], options: unknown) => {
+		const child = new EventEmitter() as EventEmitter & { stdin: PassThrough; stdout: PassThrough; stderr: PassThrough; kill(): boolean };
+		child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough();
+		const invocation = { command, args, options, script: "" }; invocations.push(invocation);
+		child.kill = () => { killed = true; queueMicrotask(() => child.emit("close", null)); return true; };
+		child.stdin.on("data", chunk => { invocation.script += chunk; });
+		child.stdin.on("finish", () => { if (!hang) queueMicrotask(() => child.emit("close", code)); });
+		return child;
+	}) as typeof cp.spawn;
+	syncBuiltinESMExports();
+	try {
+		fs.writeFileSync(path.join(localRoot, "canary.txt"), "LOCAL");
+		const write = createSshProjectTools(profile, ["write"]).find(tool => tool.name === "write")!;
+		const relative = "dir ' $(touch BAD)`x`/file ' $(touch BAD)`.txt";
+		const first = "hello $HOME && `touch LOCAL` ; end\nsecond line";
+		const second = "overwritten bytes";
+		const file = path.posix.resolve(profile.projectDir, relative);
+		const result = await write.execute("first", { path: relative, content: first }, undefined, undefined, {} as never);
+		assert.equal((result.details as { path: string; bytes: number }).path, file);
+		assert.equal((result.details as { bytes: number }).bytes, Buffer.byteLength(first));
+		await write.execute("second", { path: relative, content: second, scope: "project" }, undefined, undefined, {} as never);
+		code = 255;
+		await assert.rejects(() => write.execute("fail", { path: "ok.txt", content: "nope" }, undefined, undefined, {} as never), /no local fallback/);
+		hang = true; const controller = new AbortController();
+		const pending = write.execute("abort", { path: "ok.txt", content: "nope" }, controller.signal, undefined, {} as never);
+		controller.abort();
+		await assert.rejects(() => pending, /remote descendants\/completion may be uncertain/);
+		assert.equal(invocations.length, 4);
+		assert.equal(invocations[0]!.command, "ssh");
+		assert.equal((invocations[0]!.options as { shell: boolean }).shell, false);
+		assert(invocations[0]!.args.includes("ForwardAgent=no"));
+		assert(invocations[0]!.script.includes(sshQuote(file)));
+		assert(invocations[0]!.script.includes(sshQuote(Buffer.from(first, "utf8").toString("base64"))));
+		assert(invocations[0]!.script.includes("pwd -P"));
+		assert(invocations[0]!.script.includes('mkdir -- "./$comp"'));
+		assert(!invocations[0]!.script.includes("mkdir -p"));
+		assert(invocations[0]!.script.includes('dd of="./$base" oflag=nofollow'));
+		assert(invocations[0]!.script.includes('cd -- "$box"'));
+		assert(invocations[0]!.script.includes("set -C"));
+		assert(invocations[0]!.script.includes("> ./p"));
+		assert(!invocations[0]!.script.includes('dd of="./p"'));
+		assert(!invocations[0]!.script.includes('dd of="$box/p"'));
+		assert(!invocations[0]!.script.includes(first));
+		assert(invocations[1]!.script.includes(sshQuote(Buffer.from(second, "utf8").toString("base64"))));
+		assert(!invocations[1]!.script.includes(sshQuote(Buffer.from(first, "utf8").toString("base64"))));
+		assert(killed);
+		assert.deepEqual(fs.readdirSync(localRoot), ["canary.txt"]);
+		assert.equal(fs.readFileSync(path.join(localRoot, "canary.txt"), "utf8"), "LOCAL");
+		assert(!fs.existsSync(path.join(localRoot, "ok.txt")));
+	} finally { cp.spawn = original; syncBuiltinESMExports(); fs.rmSync(localRoot, { recursive: true, force: true }); }
+});
+
+function installLocalSsh(projectDir: string): () => void {
+	const original = cp.spawn;
+	cp.spawn = ((command: string, args: readonly string[]) => {
+		assert.equal(command, "ssh");
+		return original("bash", ["--noprofile", "--norc", "-o", "pipefail", "-c", String(args.at(-1))], { cwd: projectDir, env: { PATH: "/usr/bin:/bin" }, stdio: ["pipe", "pipe", "pipe"] });
+	}) as typeof cp.spawn;
+	syncBuiltinESMExports();
+	return () => { cp.spawn = original; syncBuiltinESMExports(); };
+}
+
+test("POSIX write recipe stores exact UTF-8 bytes and overwrites", { skip: process.platform === "win32" }, async () => {
+	const remote = fs.mkdtempSync(path.join(os.tmpdir(), "ssh-write-remote-"));
+	const local = fs.mkdtempSync(path.join(os.tmpdir(), "ssh-write-local-"));
+	fs.writeFileSync(path.join(local, "canary.txt"), "LOCAL");
+	const bound = snapshotSshProjectBootstrap({ target: "user@host", projectDir: remote, childProfile: "fresh-native-read-bash", localRuntime: { cwd: local, agentDir: local, projectTrusted: false, noContextFiles: true, projectDiscovery: "disabled" } });
+	const restore = installLocalSsh(remote);
+	try {
+		const write = createSshProjectTools(bound, ["write"]).find(tool => tool.name === "write")!;
+		const relative = "dir ' $(touch BAD)`x`/file ' $(touch BAD)`.txt";
+		const first = "hello $HOME && `touch LOCAL` ; end\nsecond line";
+		const second = "overwritten bytes";
+		await write.execute("first", { path: relative, content: first }, undefined, undefined, {} as never);
+		assert.deepEqual(fs.readFileSync(path.join(remote, relative)), Buffer.from(first, "utf8"));
+		await write.execute("second", { path: relative, content: second }, undefined, undefined, {} as never);
+		assert.deepEqual(fs.readFileSync(path.join(remote, relative)), Buffer.from(second, "utf8"));
+		assert.deepEqual(fs.readdirSync(local), ["canary.txt"]);
+		assert.equal(fs.readFileSync(path.join(local, "canary.txt"), "utf8"), "LOCAL");
+	} finally {
+		restore();
+		fs.rmSync(remote, { recursive: true, force: true });
+		fs.rmSync(local, { recursive: true, force: true });
+	}
+});
+
+test("POSIX write refuses leaf and parent-dir symlink escape", { skip: process.platform === "win32" }, async () => {
+	const remote = fs.mkdtempSync(path.join(os.tmpdir(), "ssh-write-bound-"));
+	const outside = fs.mkdtempSync(path.join(os.tmpdir(), "ssh-write-out-"));
+	const local = fs.mkdtempSync(path.join(os.tmpdir(), "ssh-write-cwd-"));
+	fs.writeFileSync(path.join(outside, "escape.txt"), "SAFE");
+	fs.symlinkSync(path.join(outside, "escape.txt"), path.join(remote, "leaf"));
+	fs.symlinkSync(outside, path.join(remote, "parent"));
+	fs.symlinkSync(path.join(outside, "missing"), path.join(remote, "dangling"));
+	fs.symlinkSync(path.relative(remote, path.join(outside, "escape.txt")), path.join(remote, "rel-leaf"));
+	fs.symlinkSync(path.relative(remote, outside), path.join(remote, "rel-parent"));
+	fs.symlinkSync(path.relative(remote, path.join(outside, "missing")), path.join(remote, "rel-dangle"));
+	fs.mkdirSync(path.join(remote, "realdir"));
+	fs.symlinkSync(path.join(outside, "escape.txt"), path.join(remote, "realdir", "swap.txt"));
+	const bound = snapshotSshProjectBootstrap({ target: "user@host", projectDir: remote, childProfile: "fresh-native-read-bash", localRuntime: { cwd: local, agentDir: local, projectTrusted: false, noContextFiles: true, projectDiscovery: "disabled" } });
+	const restore = installLocalSsh(remote);
+	try {
+		const write = createSshProjectTools(bound, ["write"]).find(tool => tool.name === "write")!;
+		for (const [id, file] of [["leaf", "leaf"], ["parent", "parent/nested.txt"], ["dangling", "dangling/sub/file.txt"], ["rel-leaf", "rel-leaf"], ["rel-parent", "rel-parent/nested.txt"], ["rel-dangle", "rel-dangle/sub/file.txt"], ["swap", "realdir/swap.txt"], ["comp", "parent/deep/file.txt"]] as const) {
+			await assert.rejects(() => write.execute(id, { path: file, content: "ESCAPED" }, undefined, undefined, {} as never), /no local fallback/);
+		}
+		assert.equal(fs.readFileSync(path.join(outside, "escape.txt"), "utf8"), "SAFE");
+		assert(!fs.existsSync(path.join(outside, "nested.txt")));
+		assert(!fs.existsSync(path.join(outside, "missing")));
+		assert(!fs.existsSync(path.join(outside, "deep")));
+		const stage = path.join(remote, ".pi-ssh-w-stage");
+		fs.mkdirSync(stage);
+		fs.symlinkSync(path.join(outside, "escape.txt"), path.join(stage, "p"));
+		const plantedLeaf = cp.spawnSync("/bin/bash", ["--noprofile", "--norc", "-o", "pipefail", "-c", "set -C; printf ESCAPED > ./p"], { cwd: stage, encoding: "utf8" });
+		assert.notEqual(plantedLeaf.status, 0);
+		const open = cp.spawnSync("/bin/dd", ["of=" + path.join(remote, "realdir", "swap.txt"), "oflag=nofollow"], { input: "ESCAPED", encoding: "utf8" });
+		assert.notEqual(open.status, 0);
+		assert.equal(fs.readFileSync(path.join(outside, "escape.txt"), "utf8"), "SAFE");
+		assert.deepEqual(fs.readdirSync(local), []);
+	} finally {
+		restore();
+		fs.rmSync(remote, { recursive: true, force: true });
+		fs.rmSync(outside, { recursive: true, force: true });
+		fs.rmSync(local, { recursive: true, force: true });
+	}
 });
 
 test("POSIX operand quoting preserves literal shell metacharacters", { skip: process.platform === "win32" }, () => {
