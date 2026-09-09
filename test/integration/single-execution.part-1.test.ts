@@ -566,6 +566,38 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(forwarded?.workflowScript, "return runs.run('main', { agent: 'echo' })");
 	});
 
+	it("rejects a static spawn-budget mismatch before discovering or launching children", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		const before = fs.readdirSync(tempDir).sort();
+		const executor = makeExecutor([makeAgent("echo")], {}, false, undefined, true, new Map(), undefined, undefined, createEventBus(), () => {
+			throw new Error("spawn-budget validation must not discover or launch agents");
+		});
+		const script = [
+			`const results = await runs.all([`,
+			`  { key: "a", agent: "echo", task: "A" },`,
+			`  { key: "b", agent: "echo", task: "B" },`,
+			`  { key: "c", agent: "echo", task: "C" },`,
+			`]);`,
+			`const owner = await runs.run("owner", { agent: "echo", task: results[0].output });`,
+			`const review = await runs.run("review", { agent: "echo", task: owner.output });`,
+			`return runs.run("owner-fix", { resume: owner.runId, task: review.output });`,
+		].join("\n");
+
+		const result = await executor.executePublic(
+			"static-budget-mismatch",
+			{ async: false, workflowScript: script, maxSubagentSpawnsPerRun: 5 },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+
+		assert.equal(result.isError, true);
+		assert.match(result.content[0]?.text ?? "", /validation failed before child launch; no children launched/);
+		assert.match(result.content[0]?.text ?? "", /'a', 'b', 'c', 'owner', 'review', 'owner-fix'/);
+		assert.match(result.content[0]?.text ?? "", /minimum required: 6; configured: 5/);
+		assert.equal(mockPi.callCount(), 0);
+		assert.deepEqual(fs.readdirSync(tempDir).sort(), before);
+	});
+
 	it("validates workflow scripts without launching children or creating artifacts", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
 		const before = fs.readdirSync(tempDir).sort();
 		const executor = makeExecutor([makeAgent("echo")], {}, false, undefined, true, new Map(), undefined, undefined, createEventBus(), () => {
@@ -585,6 +617,17 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 			ok: false,
 			errors: [{ message: "runs.run key must be 1-128 characters using letters, numbers, '.', '_' or '-', and start with a letter or number.", line: 1, column: 17 }],
 		});
+		const budgetValidation = await executor.executePublic(
+			"offline-budget-validation",
+			{ action: "validate", maxSubagentSpawnsPerRun: 1, workflowScript: `await runs.run("first", { agent: "echo" }); return runs.run("second", { agent: "echo" });` },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		assert.equal(budgetValidation.isError, true);
+		const budgetPayload = JSON.parse(budgetValidation.content[0]?.text ?? "null") as { errors?: Array<{ kind?: string; message?: string }> };
+		assert.equal(budgetPayload.errors?.[0]?.kind, "spawn-budget");
+		assert.match(budgetPayload.errors?.[0]?.message ?? "", /'first', 'second'.*minimum required: 2; configured: 1/);
 		const invalidPreflight = await executor.executePublic(
 			"invalid-preflight",
 			{ workflowScript: `return runs.run("child", { agent: "echo" });`, preflight: { version: 1, lanes: [{ key: "bad key" }] } },
@@ -3300,11 +3343,11 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 			makeMinimalCtx(tempDir),
 		);
 
-		assert.equal(result.isError, undefined, result.content[0]?.text ?? "workflow failed");
+		assert.equal(result.isError, true);
 		assert.equal(mockPi.callCount(), 0);
-		const children = result.details.workflow?.value as Array<{ ok: boolean; error?: string }>;
-		assert.deepEqual(children.map(({ ok }) => ok), [false, false]);
-		for (const child of children) assert.match(child.error ?? "", /workflow\[second\].*0\/1 used; 2 requested, 1 remaining/);
+		assert.match(result.content[0]?.text ?? "", /validation failed before child launch; no children launched/);
+		assert.match(result.content[0]?.text ?? "", /'first', 'second'.*minimum required: 2; configured: 1/);
+		assert.equal(result.details.workflow, undefined);
 	});
 
 	it("lets an explicit workflow spawn override exceed config", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
