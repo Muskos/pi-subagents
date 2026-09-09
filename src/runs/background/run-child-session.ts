@@ -23,7 +23,7 @@ import { formatSubagentModelVerificationError } from "../shared/model-fallback.t
 import { isMutatingTool, resolveCurrentPath } from "../shared/long-running-guard.ts";
 import { effectiveToolTimeoutMs, formatToolTimeoutMessage, toolTimeoutCallKey } from "../shared/tool-timeout.ts";
 import { createReportedChildSessionInput, type InProcessChildLaunch } from "../shared/child-launch.ts";
-import { projectChildSessionEventForJson, type ChildSession, type ChildSessionEvent, type ChildSessionFactory } from "../shared/child-session.ts";
+import { childSessionHasQueuedMessages, projectChildSessionEventForJson, type ChildSession, type ChildSessionEvent, type ChildSessionFactory } from "../shared/child-session.ts";
 import { formatSteerMessage } from "../shared/subagent-prompt-runtime.ts";
 import { getReadonlySessionEvidence, requestReadonlySessionEvidence, type SettledReadonlyEvidence } from "../shared/readonly-session-evidence.ts";
 import type { SteerDeliveryStatus, SteerRequest } from "./control-channel.ts";
@@ -193,6 +193,7 @@ export function runChildSession(input: RunChildSessionInput): Promise<RunChildSe
 		let forcedTermination = false;
 		let cleanTerminalAssistantStopReceived = false;
 		let agentSettledReceived = false;
+		let queuedDrainHold = false;
 		let compactionStartedReceived = false;
 		let afterCompactionSettlement = false;
 		let finalDrainTimer: NodeJS.Timeout | undefined;
@@ -311,17 +312,26 @@ export function runChildSession(input: RunChildSessionInput): Promise<RunChildSe
 		}
 		// If the child emits its terminal event but its run never settles (a hook
 		// is stuck), abort it after a short grace period and then finish without it.
+		const observeQueuedDrainHold = (): boolean => {
+			if (childSessionHasQueuedMessages(session)) queuedDrainHold = true;
+			return queuedDrainHold;
+		};
 		function startFinalDrain(): void {
 			if (childWatchdogIsActive(childWatchdogState)) {
 				armWatchdogTail();
 				return;
 			}
 			if (promptSettled || finalDrainTimer || settled) return;
+			if (observeQueuedDrainHold()) return;
+			armFinalDrainTimer();
+		}
+		function armFinalDrainTimer(): void {
+			if (promptSettled || finalDrainTimer || settled) return;
 			finalDrainTimer = setTimeout(() => {
 				if (settled || promptSettled) return;
-				if (input.launch.capture.finalDrainHeld()) {
+				if (input.launch.capture.finalDrainHeld() || observeQueuedDrainHold()) {
 					finalDrainTimer = undefined;
-					startFinalDrain();
+					armFinalDrainTimer();
 					return;
 				}
 				forcedTermination = true;
@@ -407,6 +417,9 @@ export function runChildSession(input: RunChildSessionInput): Promise<RunChildSe
 			if (event.type === "compaction_end" && event.willRetry === true) {
 				compactionStartedReceived = false;
 				afterCompactionSettlement = false;
+			}
+			if (event.type === "turn_start" || event.type === "agent_start" || event.type === "auto_retry_start") {
+				queuedDrainHold = false;
 			}
 			if (event.type === "agent_start" || event.type === "auto_retry_start") {
 				compactionStartedReceived = false;
@@ -618,6 +631,16 @@ export function runChildSession(input: RunChildSessionInput): Promise<RunChildSe
 					return;
 				}
 				session = created;
+				const steer = created.steer.bind(created);
+				const followUp = created.followUp.bind(created);
+				created.steer = async (text) => {
+					if (cleanTerminalAssistantStopReceived || agentSettledReceived) queuedDrainHold = true;
+					return steer(text);
+				};
+				created.followUp = async (text) => {
+					if (cleanTerminalAssistantStopReceived || agentSettledReceived) queuedDrainHold = true;
+					return followUp(text);
+				};
 				checkContinuation();
 				if (continuation && (created.modelId !== continuation.modelId || input.launch.capture.completionIntentContext?.()?.model?.api !== continuation.expected.api)) throw new Error("Read-only continuation model changed");
 				unsubscribe = created.subscribe(processEvent);
