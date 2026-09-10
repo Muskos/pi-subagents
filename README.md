@@ -82,13 +82,14 @@ The package includes `/council` and `council-mode`, plus documented model-based
 | Review until clean | "Run a review loop on this change with a max of 3 rounds." |
 | Execute a plan carefully | "Have worker implement this approved plan, then run reviewers and apply the feedback." |
 | Scout before planning | "Use scout to inspect the auth flow before planning." |
+| Audit decision-critical research | "Use `/audited-research` to research this decision and independently validate the evidence." |
 | Run in the background | "Run this in the background." |
 | Use a saved workflow | "Run the review chain on this branch." |
 | Browse agents | "Show me the available subagents." |
 | See running work | "Show active async runs." or "Show the subagent fleet." |
 | Check setup | "Check whether subagents are configured correctly." |
 
-For implementation work, the recommended loop is `clarify → scout → worker → fresh reviewers → worker`. Packaged prompt shortcuts like `/parallel-review` and `/review-loop` make these patterns repeatable — see [Workflows](https://github.com/nicobailon/pi-subagents/blob/main/docs/workflows.md).
+For implementation work, the recommended loop is `clarify → scout → worker → fresh reviewers → worker`. Packaged prompt shortcuts like `/parallel-review`, `/audited-research`, and `/review-loop` make these patterns repeatable — see [Workflows](https://github.com/nicobailon/pi-subagents/blob/main/docs/workflows.md).
 
 ## Where running work shows up
 
