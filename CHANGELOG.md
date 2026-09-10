@@ -2,73 +2,73 @@
 
 ## [Unreleased]
 
+## [0.67.0] - 2026-09-10
+
 ### Highlights
-- Make child launches more trustworthy by aligning preflight with execution across Intercom, refinement, prompt, and tool overlays, while rejecting invalid launch inputs before children start.
-- Improve workflow orchestration with natural `runs.run(...)` promise composition in `runs.all(...)`, per-child completion updates, and supervisor routing for delegated coordinators.
-- Strengthen steering and background lifecycle behavior across follow-ups, final drain, resumed work, detached descendants, paused runs, and process cleanup.
-- Clarify active work through more accurate FleetView usage, timing, grouping, colors, and workflow rendering, plus portable Inspect commands and better theme and Orca handling.
-- Improve schedules and runtime compatibility with quiet runs, manual-run deduplication, watchdog and model fallback fixes, Pi 0.85 standalone support, provider routing, package-root handling, and Windows fixes.
+- Launch previews now match what actually runs, including Intercom and prompt and tool customization.
+- Parallel workflows are easier to write and follow, with natural promise composition and per-child completion updates.
+- Child-facing tool instructions use less context, leaving more of the token budget available for the task itself.
+- Steering, follow-ups, resumed work, and detached processes finish more reliably.
+- FleetView and workflow status are clearer, with better grouping, timing, usage, and colors.
 
 ### Added
-- Add opt-in watchdog `fallbackModels` for main, children, and per-agent overrides, retrying provider failures only before tool work within the existing review deadline. Thanks to [@dwizzle204](https://github.com/dwizzle204) for #2075.
-- Add portable Inspect commands and a terminal-neutral plugin seam, including open-only Ghostty 1.3+ right splits on macOS. Thanks to [@tiratatp](https://github.com/tiratatp) for #2046.
-- Add an opt-in `quiet: true` flag for recurring `schedule.create`. A quiet schedule's successful automatic runs and successful workflow children keep their completion notices but no longer trigger a parent turn; failed, stopped, or paused outcomes still wake the session. One-shot `at` schedules and `schedule.run` stay noisy unless that launch passes `quiet: true`. Default behavior is unchanged. Thanks to [@pablontiv](https://github.com/pablontiv) for #2055.
-- Add default-off, main-only watchdog questions and task-continuity reviews from bounded delivered orchestration evidence (#2010).
-- Add the built-in `evidence-auditor` for independently reviewing important research claims and source support. Thanks to [@Muskos](https://github.com/Muskos) for #2023.
-- Notify the parent as individual async workflow children finish, without waiting for all siblings (#2027). Each child completion delivers a compact notification with the workflow run ID, child key, exact child run ID, outcome, and output reference while the workflow remains running.
-- Accept a per-launch `intercomBridge` override on structured delegation requests and launch-contract preflight, plus an optional preflight `orchestratorTarget` for custom bridge templates that name the parent session. Preflight contracts now report the resolved bridge state as `intercomBridge` and fail closed with `invalid_intercom_bridge` for malformed overrides (#2127). Thanks to [@Yivas](https://github.com/Yivas) for the instrumented reproduction.
+- Add optional watchdog fallback models for the main session, children, and individual agents. Fallback happens only for provider failures before tool use and within the existing review timeout. Thanks to [@dwizzle204](https://github.com/dwizzle204) for #2075.
+- Add portable Inspect commands and a terminal-neutral integration point, including open-only Ghostty 1.3+ right splits on macOS. Thanks to [@tiratatp](https://github.com/tiratatp) for #2046.
+- Add `quiet: true` for recurring schedules. Successful automatic runs stay visible without waking the parent; failures, stops, and pauses still wake it. One-shot and manually started schedules remain noisy unless explicitly made quiet. Thanks to [@pablontiv](https://github.com/pablontiv) for #2055.
+- Add optional watchdog questions that flag possible task drift before a main-session change finishes (#2010).
+- Add the built-in `evidence-auditor` for checking whether important research claims are supported by their sources. Thanks to [@Muskos](https://github.com/Muskos) for #2023.
+- Notify the parent as each asynchronous workflow child finishes instead of waiting for every sibling. Notifications include the workflow, child, outcome, and result location (#2027).
+- Add per-launch `intercomBridge` overrides to delegation and preflight, plus `orchestratorTarget` for custom bridge templates that name the parent. Invalid overrides now fail clearly (#2127). Thanks to [@Yivas](https://github.com/Yivas) for the instrumented reproduction.
 
 ### Changed
-- The default Intercom bridge instruction no longer names the parent session; `contact_supervisor` already resolves it from the child runtime config. Custom `instructionFile` templates keep interpolating `{orchestratorTarget}`. The launch-contract version is now 3 and the launch-binding projection version is now 2, so every `launchContractDigest` value changes; stored digests are only recorded, never compared, so existing runs still resume (#2127). Thanks to [@Yivas](https://github.com/Yivas) for the instrumented reproduction.
-- Report host-pruned child tools in existing launch warnings, including the agent, requested/effective tool names, and active ceiling sources when known, without changing launch outcomes. Diagnostic follow-up for #2058.
-- Consolidate model-facing subagent prose while retaining the flat typed execution/control API; keep extended recipes in the existing on-demand guides. Thanks to [@Whamp](https://github.com/Whamp) for the prompt-footprint measurements and proposal in #2048.
-- Color FleetView agent labels by stable agent identity so multi-agent runs are easier to scan. Thanks to [@savinofiore](https://github.com/savinofiore) for #2056.
-- Forked children keep their requested thinking level after signed Anthropic thinking blocks are stripped from the inherited transcript; fork context no longer forces thinking off for Anthropic-backed children. Requires a Pi host on 0.85.0 or newer, which recovers from signed-thinking mismatches on the transport. Thanks to [@hank-warren](https://github.com/hank-warren) for #2021.
-- Clarify that parallel-review findings are scoped to the named review target, while diff reviews still require diff-caused or diff-reachable issues. Thanks to [@jmclaughlin724](https://github.com/jmclaughlin724) for #2042.
-- Simplify watchdog clarification to a visible question and native orchestrator continuation; remove the reply action, exchange tracking, deadlines and mandatory follow-up reviews.
-- Document task-derived behavior labels for workflow launches in the built-in pi-subagents skill, including reviews and retained follow-ups.
+- Make the default Intercom bridge prompt independent of the parent session while preserving `{orchestratorTarget}` in custom templates. Launch contracts are now version 3 and launch-binding projections version 2, so launch-contract digests change in this release; existing saved runs still resume (#2127). Thanks to [@Yivas](https://github.com/Yivas) for the instrumented reproduction.
+- Include removed child tools and their active restrictions in launch warnings without changing launch behavior. Follow-up for #2058.
+- Shorten the default child-facing instructions while keeping the full typed API and detailed guides. Thanks to [@Whamp](https://github.com/Whamp) for the prompt-footprint measurements and proposal in #2048.
+- Give FleetView agents stable identity colors. Thanks to [@savinofiore](https://github.com/savinofiore) for #2056.
+- Preserve a forked child's requested thinking level after incompatible signed Anthropic thinking blocks are removed. This requires Pi 0.85.0 or newer. Thanks to [@hank-warren](https://github.com/hank-warren) for #2021.
+- Scope parallel-review findings to the requested target, while diff reviews continue to report only issues caused or exposed by the diff. Thanks to [@jmclaughlin724](https://github.com/jmclaughlin724) for #2042.
+- Simplify watchdog clarification to one visible question followed by native continuation, removing reply tracking and mandatory follow-up reviews.
+- Show task-based labels for workflow launches, reviews, and continued child work.
 
 ### Fixed
-- Accept `runs.run(...)` launch promises passed to `runs.all([...])` instead of failing with a misleading "runs.all item N has an invalid key" error, so the natural `runs.all(items.map((item) => runs.run(...)))` pattern works. Warn once per workflow that batch fingerprint validation, fleet-view batch grouping, and `collectFailure` semantics are only available when items are config objects. Thanks to [@karandhillon1995](https://github.com/karandhillon1995) for #2128.
-- Bind the Intercom bridge prompt and `contact_supervisor` tool into `launchContractDigest` during launch-contract preflight, so public preflight matches foreground and async execution when the bridge is active. Keep the parsed-definition digest independent of the bridge overlay on every execution path, and assemble launch identity through one shared binding instead of four copies (#2127; remaining #2112 residual). Thanks to [@Yivas](https://github.com/Yivas) for the instrumented reproduction.
-- Report async steer and follow-up requests as delivered only after the child consumes the correlated input, and fail unconsumed requests when the child settles (#2116, #2121). Thanks to [@yanqianglu](https://github.com/yanqianglu) for #2057.
-- Do not abort a native child during final-stop drain after queued steering or follow-up is observed, even if Pi drains that input before a delayed `turn_start`. Related to #2117; thanks to [@yanqianglu](https://github.com/yanqianglu) for #2057.
-- Allow explicit deletion of a session-only schedule from another session when the recorded exact async run has terminal status, while continuing to refuse deletion without matching terminal evidence (#2125).
-- Fail review and scout launches closed when a requested, still-permitted repository tool is missing from the host runtime, and classify that gap as a lane infrastructure failure instead of a completed review. Intentionally empty or ceiling-restricted allowlists stay valid. Remaining #2058 residual.
-- Apply the same project-local refinement overlay during launch-contract preflight that foreground execution already injects, so `launchContractDigest` matches the completed terminal. Thanks to [@Yivas](https://github.com/Yivas) for #2112.
-- Reject workflow scripts whose statically provable child launches exceed `maxSubagentSpawnsPerRun` before discovery, artifact creation, or child launch; dynamic launch counts remain advisory and retain runtime enforcement. Thanks to [@ton77v](https://github.com/ton77v) for #2101.
-- Label workflow usage as belonging to child rows instead of showing a misleading zero or overlapping wrapper totals in FleetView; preserve unrelated standalone usage in mixed summaries and distinguish summed concurrent windows from a single context window. Related to #2085; thanks to [@expoli](https://github.com/expoli).
-- Restore background SDK sessions for the official Pi 0.85.1 Linux x64 standalone release, without a separate SDK install; npm runners keep their package-root and lifecycle behavior. Thanks to [@xz-dev](https://github.com/xz-dev) for #2049.
-- Preserve the parent's active theme when foreground children start, while initializing themes in detached runners and refreshing slash-result rendering. Thanks to [@kubahasek](https://github.com/kubahasek) for #2089.
-- Advance live workflow and lane elapsed times from their starts, and nest loaded workflow children in the async widget instead of repeating lane rows and sibling cards. Partial fix for #2085; thanks to [@expoli](https://github.com/expoli).
-- Collapse duplicate async workflow details only when the same inline Fleet roster fully renders the group, including flat materialized native leaf children with fresh identity coverage; retain detail for nested, truncated, or uncertain coverage. Related to #2085; thanks to [@expoli](https://github.com/expoli).
-- Let fanout-authorized child coordinators answer their own children's supervisor requests with explicitly selected `subagent_supervisor`, preserving immediate-parent session ownership and tool restrictions. Keep explicitly requested native coordination tools through host-builtin filtering, and poll only live descendant channels. Thanks to [@shaharmor](https://github.com/shaharmor) for #2087.
-- Allow read-only reviewers to classify findings as quoted "must fix before" categories without treating the labels as implementation instructions; actual required fixes still require mutation tools. Thanks to [@freezscholte](https://github.com/freezscholte) for #2079.
-- Reject materialized workflow launch groups with invalid worktree repositories or dirty sources before dispatching children or claiming fan-out/output ownership. Allocation still rechecks; workflow-key failure traces may remain. Thanks to [@yanqianglu](https://github.com/yanqianglu) for #2076.
-- Keep the configured main watchdog model and thinking in recommendations instead of suggesting a hardcoded replacement, and clarify user-scope model saves. Thanks to [@freezscholte](https://github.com/freezscholte) for #2078.
-- Recognize OpenRouter's status-prefixed 401 errors for configured model fallback before tool work, including watchdog reviews. Thanks to [@freezscholte](https://github.com/freezscholte) for #2077.
-- A manual `schedule.run` that attaches a run satisfies the next natural fire, so manually-run schedules no longer double-fire (#2052). Thanks to [@brandonmwest](https://github.com/brandonmwest) for #2052.
-- Wait for remembered detached foreground descendants before parent settlement, without aborting a result-bearing child on the runner grace window. Thanks to [@shaharmor](https://github.com/shaharmor) for #2051.
-- Do not report owned process-tree cleanup as `observed` when a detached descendant remains active after the owned process group exits. Thanks to [@rtbe](https://github.com/rtbe) for #2053.
-- Ignore verbs inside filenames and path-like tokens when classifying implementation intent, so artifact names such as `daily-update.mp3` do not create an implementation obligation. Thanks to [@SiebertLanhove](https://github.com/SiebertLanhove) for #2039.
-- Accept the boolean `fast` field on async recovery descriptors so a setting the writer persists can round-trip through follow-up. Thanks to [@isty2e](https://github.com/isty2e) for #2045.
-- Override `PI_PACKAGE_DIR` in detached runners with the detected npm Pi package root so npm runtime assets resolve from that package instead of an inherited host path. Thanks to [@alvarosevilla95](https://github.com/alvarosevilla95) for #2050.
-- Preserve explicit read-only task intent after host capability clamping, while still blocking implementation tasks that lack mutation tools. Thanks to [@stekman08](https://github.com/stekman08) for #2060.
-- Parse the full stdout of `orca terminal create --json` so the observer manifest stores `orcaHandle` / `orcaTabId` / `orcaTitle` instead of `orcaRaw: "}"`. Thanks to [@G0-0000](https://github.com/G0-0000) for #2063.
-- Keep workflow child tool exposure aligned with advertised agent tools when auto-discovered extensions wrap Pi builtins, and relocate auto-selected extension-repo worktrees outside Pi's extension auto-discovery directory (#2059).
-- Run the child prompt filter before ambient extensions inspect the system prompt. This keeps provider bridges aligned with the final child-visible context while preserving intentional global-context and parent-only skill exclusions. Thanks to [@leftytennis](https://github.com/leftytennis) for #2043.
-- Send OpenCode session-routing headers on internal helper model calls so task arbitration, watchdog, and prompt audit requests keep the same provider session as ordinary Pi traffic. Thanks to [@IdrisGit](https://github.com/IdrisGit) for #2041.
-- Intersect agent frontmatter `tools:` with host-available builtins before spawning children, so hosts with restricted tool menus (e.g. Prime Agent's `ipython`-only set) reject unavailable tools at launch instead of after spawn. Thanks to [@BioInfo](https://github.com/BioInfo) for #2034.
-- Redirect `@earendil-works/pi-tui` via module hooks in background runners alongside `pi-server`, avoiding MODULE_NOT_FOUND in unusual installation layouts where the package exists in the alias map but cannot be found through standard node_modules resolution (#2020). Thanks to [@kroediger](https://github.com/kroediger).
-- Prevent stale final-drain timers from aborting resumed native foreground and background child work. Thanks to [@harche](https://github.com/harche) for #2025.
-- Avoid requiring chord aliases on pre-0.85 Pi hosts while keeping required host runtime aliases fail-closed (#2026). Thanks to [@samuela](https://github.com/samuela).
-- Invoke Worktrunk through `git wt` on Windows to avoid Windows Terminal's conflicting `wt.exe` alias. Thanks to [@Zethu5](https://github.com/Zethu5) for #2033.
-- Defer completion-only failures while background runs are paused, without waiving completion requirements. Thanks to [@yanqianglu](https://github.com/yanqianglu) for #2022.
-- Show exact recorded async child IDs in workflow status and actionable child steering guidance when an owned workflow has no foreground route, without treating queued messages as consumed (#2011).
-- Bound transcript previews by individual line size and total rendered body size, preserving recent context and full artifact references. Thanks to [@rtbe](https://github.com/rtbe) for #2015.
-- Await a bounded, offline model registry refresh before opening `/subagents` model and thinking pickers, and warn on refresh failures. Thanks to [@ianbmacdonald](https://github.com/ianbmacdonald) for #2008.
-- Freeze terminal FleetView detail elapsed from recorded duration or end time, omitting unknown durations while running rows keep advancing. Related to #2085 (partial); thanks to [@expoli](https://github.com/expoli).
-- Preserve input and return shapes in `appendAdvertisedAgentPrompt` with overloads for string, array, and undefined system prompt callers in `before_agent_start`. Thanks to [@luqman-v1](https://github.com/luqman-v1) for #2107.
+- Accept `runs.run(...)` promises in `runs.all(...)`, including the natural `items.map(...)` form, instead of reporting an invalid key. A one-time warning explains when config objects are still required for batch validation, grouping, and `collectFailure`. Thanks to [@karandhillon1995](https://github.com/karandhillon1995) for #2128.
+- Make Intercom-aware preflight produce the same launch digest as foreground and background execution, while keeping the parsed agent definition independent of runtime bridge changes (#2127 and #2112). Thanks to [@Yivas](https://github.com/Yivas) for the instrumented reproduction.
+- Apply project refinements during preflight so its launch digest matches the completed run. Thanks to [@Yivas](https://github.com/Yivas) for #2112.
+- Report steering and follow-up requests as delivered only after the child consumes them, and report unconsumed requests accurately when the child finishes (#2116 and #2121). Thanks to [@yanqianglu](https://github.com/yanqianglu) for #2057.
+- Keep native children alive during final shutdown when queued steering or follow-up work is still pending (#2117). Thanks to [@yanqianglu](https://github.com/yanqianglu) for #2057.
+- Prevent stale shutdown timers from aborting resumed foreground or background work. Thanks to [@harche](https://github.com/harche) for #2025.
+- Wait for remembered detached descendants before their parent finishes, without aborting children that already produced a result. Thanks to [@shaharmor](https://github.com/shaharmor) for #2051.
+- Keep paused background runs from failing on checks that apply only at completion. Thanks to [@yanqianglu](https://github.com/yanqianglu) for #2022.
+- Report process-tree cleanup as complete only after detached descendants have actually stopped. Thanks to [@rtbe](https://github.com/rtbe) for #2053.
+- Let approved child coordinators answer supervisor questions from their own children while preserving immediate-parent ownership and tool restrictions. Thanks to [@shaharmor](https://github.com/shaharmor) for #2087.
+- Allow read-only reviewers to quote phrases such as “must fix before” without being mistaken for implementation requests. Thanks to [@freezscholte](https://github.com/freezscholte) for #2079.
+- Preserve explicitly read-only requests after tool restrictions are applied, while still rejecting implementation work without write tools. Thanks to [@stekman08](https://github.com/stekman08) for #2060.
+- Stop review and scout launches before startup when requested repository tools are unavailable. Explicitly empty or restricted tool sets remain valid. Follow-up for #2058.
+- Keep workflow child tools aligned with the selected agent when extensions wrap Pi built-ins, and place automatic extension-repository worktrees outside extension discovery (#2059).
+- Validate worktree repositories and cleanliness before starting parallel workflow children. Thanks to [@yanqianglu](https://github.com/yanqianglu) for #2076.
+- Reject workflows whose known child count exceeds `maxSubagentSpawnsPerRun` before starting any child; dynamic counts remain limited at runtime. Thanks to [@ton77v](https://github.com/ton77v) for #2101.
+- Show workflow usage on child rows instead of displaying overlapping or misleading wrapper totals. Thanks to [@expoli](https://github.com/expoli) for #2085.
+- Keep live workflow timers advancing, nest loaded children correctly, collapse only fully represented duplicate groups, and freeze completed durations accurately. Thanks to [@expoli](https://github.com/expoli) for #2085.
+- Preserve the parent's theme in foreground children, initialize themes in detached children, and refresh command-result rendering. Thanks to [@kubahasek](https://github.com/kubahasek) for #2089.
+- Parse complete Orca creation output so observer handles, tab IDs, and titles are stored correctly. Thanks to [@G0-0000](https://github.com/G0-0000) for #2063.
+- Keep the configured watchdog model and thinking level when recommending models. Thanks to [@freezscholte](https://github.com/freezscholte) for #2078.
+- Recognize OpenRouter's status-prefixed 401 response as eligible for configured fallback before tool use. Thanks to [@freezscholte](https://github.com/freezscholte) for #2077.
+- Keep internal OpenCode helper requests in the same provider session as normal Pi traffic. Thanks to [@IdrisGit](https://github.com/IdrisGit) for #2041.
+- Run the child prompt filter before extensions inspect the final prompt, preserving intentional global-context and parent-only skill exclusions. Thanks to [@leftytennis](https://github.com/leftytennis) for #2043.
+- Intersect agent tool declarations with tools available from the host, so restricted hosts reject unavailable tools before starting a child. Thanks to [@BioInfo](https://github.com/BioInfo) for #2034.
+- Allow `fast` to round-trip through background recovery and follow-up. Thanks to [@isty2e](https://github.com/isty2e) for #2045.
+- Use the detected npm Pi package root in detached runners instead of an inherited host path. Thanks to [@alvarosevilla95](https://github.com/alvarosevilla95) for #2050.
+- Restore background SDK sessions for the official Pi 0.85.1 Linux standalone while retaining Pi 0.85.0 support. Thanks to [@xz-dev](https://github.com/xz-dev) for #2049.
+- Resolve Pi TUI aliases correctly in unusual package layouts. Thanks to [@kroediger](https://github.com/kroediger) for #2020.
+- Avoid requiring newer chord aliases on Pi versions before 0.85 while keeping required runtime aliases strict. Thanks to [@samuela](https://github.com/samuela) for #2026.
+- Use `git wt` for Worktrunk on Windows to avoid the Windows Terminal `wt.exe` conflict. Thanks to [@Zethu5](https://github.com/Zethu5) for #2033.
+- Prevent manually started schedules from firing again at their next natural time. Thanks to [@brandonmwest](https://github.com/brandonmwest) for #2052.
+- Allow terminal schedules owned by an earlier session to be deleted when their exact run is known to have finished (#2125).
+- Show exact child IDs and usable steering guidance in workflow status when a workflow no longer has a foreground route (#2011).
+- Ignore action-like words inside filenames and paths when deciding whether a task requests implementation. Thanks to [@SiebertLanhove](https://github.com/SiebertLanhove) for #2039.
+- Bound transcript previews by line and total size while preserving recent context and artifact links. Thanks to [@rtbe](https://github.com/rtbe) for #2015.
+- Refresh the local model registry before opening model and thinking selectors, and warn when refresh fails. Thanks to [@ianbmacdonald](https://github.com/ianbmacdonald) for #2008.
+- Preserve string, string-array, and undefined system-prompt shapes in `before_agent_start`. Thanks to [@luqman-v1](https://github.com/luqman-v1) for #2107.
 
 ## [0.66.0] - 2026-09-06
 
