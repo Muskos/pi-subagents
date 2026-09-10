@@ -20,6 +20,7 @@
 - Document task-derived behavior labels for workflow launches in the built-in pi-subagents skill, including reviews and retained follow-ups.
 
 ### Fixed
+- Report async steer and follow-up requests as delivered only after the child consumes the correlated input, and fail unconsumed requests when the child settles (#2116, #2121). Thanks to [@yanqianglu](https://github.com/yanqianglu) for #2057.
 - Do not abort a native child during final-stop drain after queued steering or follow-up is observed, even if Pi drains that input before a delayed `turn_start`. Related to #2117; thanks to [@yanqianglu](https://github.com/yanqianglu) for #2057.
 - Allow explicit deletion of a session-only schedule from another session when the recorded exact async run has terminal status, while continuing to refuse deletion without matching terminal evidence (#2125).
 - Fail review and scout launches closed when a requested, still-permitted repository tool is missing from the host runtime, and classify that gap as a lane infrastructure failure instead of a completed review. Intentionally empty or ceiling-restricted allowlists stay valid. Remaining #2058 residual; thanks to [@nicobailon](https://github.com/nicobailon).
