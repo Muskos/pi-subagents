@@ -31,6 +31,7 @@ import registerSubagentExtension from "../../src/extension/index.ts";
 import { handleSubagentControlNotice } from "../../src/extension/control-notices.ts";
 import { discoverAgents } from "../../src/agents/agents.ts";
 import { resolveSubagentLaunchContract } from "../../src/api/preflight.ts";
+import { INTERCOM_BRIDGE_MARKER, resolveIntercomSessionTarget } from "../../src/intercom/intercom-bridge.ts";
 import { createStructuredOutputRuntime } from "../../src/runs/shared/structured-output.ts";
 import {
 	SUBAGENT_DELEGATION_REQUEST_EVENT,
@@ -375,6 +376,8 @@ When the task asks for a structured result, keep field names exactly as requeste
 			skill: false,
 			output: false,
 			artifacts: false,
+			// runSync sits below the executor step that applies the bridge.
+			intercomBridge: { mode: "off" as const },
 		};
 		const preflight = await resolveSubagentLaunchContract(launchInput);
 		assert.equal(preflight.ok, true);
@@ -397,6 +400,175 @@ When the task asks for a structured result, keep field names exactly as requeste
 		assert.equal(foreground.exitCode, 0, foreground.error);
 		assert.deepEqual(foreground.structuredOutput, { ok: true, note: "captured" });
 		assert.equal((foreground as { launchContractDigest?: string }).launchContractDigest, preflight.contract.launchContractDigest);
+	});
+
+	it("matches preflight launch digest for structured delegation with the Intercom bridge active", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		const outputSchema = { type: "object" as const, required: ["ok"], properties: { ok: { type: "boolean" } } };
+		const task = "Return the requested structured result.";
+		const structuredCall = {
+			stdoutRaw: [
+				{ type: "tool_execution_start", toolName: "structured_output", args: { value: { ok: true } } },
+				{ type: "tool_result_end", message: { role: "toolResult", toolName: "structured_output", content: [{ type: "text", text: "Structured output captured." }] } },
+				{ type: "tool_execution_end", toolName: "structured_output" },
+			].map((entry) => JSON.stringify(entry)).join("\n") + "\n",
+			structuredOutputCapture: { ok: true },
+		};
+		// Both shapes matter: the bridge rewrites the prompt for every agent and
+		// widens the tool list only when the agent declares one.
+		for (const declaredTools of ["", "\n  - read"]) {
+			const agentName = `bridge-digest-${declaredTools ? "tools" : "prompt"}-${Date.now().toString(36)}`;
+			const agentPath = path.join(tempDir, ".pi", "agents", `${agentName}.md`);
+			fs.mkdirSync(path.dirname(agentPath), { recursive: true });
+			fs.writeFileSync(agentPath, `---
+name: ${agentName}
+description: Bridge digest probe
+tools:${declaredTools}
+extensions:
+systemPromptMode: replace
+inheritProjectContext: false
+inheritSkills: false
+defaultContext: fresh
+---
+
+Answer only from the supplied synthetic text.
+`, "utf-8");
+			const discovered = discoverAgents(tempDir).agents.find((agent) => agent.name === agentName);
+			assert.ok(discovered, "expected temporary agent definition to be discovered");
+
+			const preflight = await resolveSubagentLaunchContract({
+				agent: agentName,
+				cwd: tempDir,
+				task,
+				context: "fresh",
+				model: "mock/model",
+				outputSchema,
+				skill: false,
+				output: false,
+				artifacts: false,
+			});
+			assert.equal(preflight.ok, true);
+			if (!preflight.ok) return;
+			assert.deepEqual(preflight.contract.intercomBridge, { mode: "always", active: true });
+			assert.equal(preflight.contract.tools.effectiveAllowlist.includes("contact_supervisor"), Boolean(declaredTools));
+
+			mockPi.onCall(structuredCall);
+			const request: SubagentDelegationRequest = {
+				requestId: `${agentName}-attempt`,
+				ownerRunId: "owner-bridge-digest",
+				nodeId: agentName,
+				agent: agentName,
+				task,
+				context: "fresh",
+				cwd: tempDir,
+				model: "mock/model",
+				skill: false,
+				artifacts: false,
+				result: { kind: "structured", schema: outputSchema },
+			};
+			const result = await makeExecutor([discovered]).executeDelegated(
+				request.requestId,
+				toSubagentDelegationExecutionParams(request),
+				new AbortController().signal,
+				undefined,
+				makeMinimalCtx(tempDir),
+			);
+			assert.equal(result.isError, undefined, result.content[0]?.text ?? "delegated execution failed");
+			const child = result.details?.results?.[0];
+			assert.deepEqual(child?.structuredOutput, { ok: true });
+			assert.equal(child?.launchContractDigest, preflight.contract.launchContractDigest);
+
+			const call = readCall();
+			const childPrompt = call.systemPrompts.map((entry) => entry.text ?? (entry.path ? fs.readFileSync(entry.path, "utf-8") : "")).join("\n");
+			assert.ok(childPrompt.includes(INTERCOM_BRIDGE_MARKER), "child prompt should carry the bridge instruction");
+			assert.equal(call.launch?.tools?.includes("contact_supervisor") ?? false, Boolean(declaredTools));
+		}
+	});
+
+	it("matches preflight launch digest when a delegation override turns the Intercom bridge off", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		const agentName = `bridge-off-${Date.now().toString(36)}`;
+		const task = "Return the plain result.";
+		const agentPath = path.join(tempDir, ".pi", "agents", `${agentName}.md`);
+		fs.mkdirSync(path.dirname(agentPath), { recursive: true });
+		fs.writeFileSync(agentPath, `---\nname: ${agentName}\ndescription: Bridge override probe\ntools:\n  - read\ncompletionGuard: false\n---\nAnswer from the task only.\n`, "utf-8");
+		const discovered = discoverAgents(tempDir).agents.find((agent) => agent.name === agentName);
+		assert.ok(discovered, "expected temporary agent definition to be discovered");
+		const intercomBridge = { mode: "off" as const };
+
+		const preflight = await resolveSubagentLaunchContract({ agent: agentName, cwd: tempDir, task, context: "fresh", model: "mock/model", skill: false, output: false, artifacts: false, intercomBridge });
+		assert.equal(preflight.ok, true);
+		if (!preflight.ok) return;
+		assert.deepEqual(preflight.contract.intercomBridge, { active: false, mode: "off" });
+		assert.equal(preflight.contract.tools.effectiveAllowlist.includes("contact_supervisor"), false);
+
+		mockPi.onCall({ output: "bridge off" });
+		const request: SubagentDelegationRequest = {
+			requestId: `${agentName}-attempt`,
+			ownerRunId: "owner-bridge-off",
+			nodeId: agentName,
+			agent: agentName,
+			task,
+			context: "fresh",
+			cwd: tempDir,
+			model: "mock/model",
+			skill: false,
+			artifacts: false,
+			intercomBridge,
+			result: { kind: "text" },
+		};
+		const result = await makeExecutor([discovered]).executeDelegated(request.requestId, toSubagentDelegationExecutionParams(request), new AbortController().signal, undefined, makeMinimalCtx(tempDir));
+		assert.equal(result.isError, undefined, result.content[0]?.text ?? "delegated execution failed");
+		assert.equal(result.details?.results?.[0]?.launchContractDigest, preflight.contract.launchContractDigest);
+		const call = readCall();
+		const childPrompt = call.systemPrompts.map((entry) => entry.text ?? (entry.path ? fs.readFileSync(entry.path, "utf-8") : "")).join("\n");
+		assert.equal(childPrompt.includes(INTERCOM_BRIDGE_MARKER), false, "override must keep the bridge out of the child prompt");
+		assert.equal(call.launch?.tools?.includes("contact_supervisor") ?? false, false);
+	});
+
+	it("matches preflight launch digest for a custom bridge template when the host supplies the session target", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
+		const agentName = `bridge-template-${Date.now().toString(36)}`;
+		const task = "Return the plain result.";
+		const agentPath = path.join(tempDir, ".pi", "agents", `${agentName}.md`);
+		fs.mkdirSync(path.dirname(agentPath), { recursive: true });
+		fs.writeFileSync(agentPath, `---\nname: ${agentName}\ndescription: Bridge template probe\ncompletionGuard: false\n---\nAnswer from the task only.\n`, "utf-8");
+		const discovered = discoverAgents(tempDir).agents.find((agent) => agent.name === agentName);
+		assert.ok(discovered, "expected temporary agent definition to be discovered");
+		const instructionFile = path.join(tempDir, "custom-bridge.md");
+		fs.writeFileSync(instructionFile, "Custom bridge for {orchestratorTarget}\nUse ask then send.\n", "utf-8");
+		const intercomBridge = { mode: "always" as const, instructionFile };
+		// The executor derives this from the parent session; a host reproduces it with the public helper.
+		const ctx = makeMinimalCtx(tempDir);
+		const orchestratorTarget = resolveIntercomSessionTarget(undefined, ctx.sessionManager.getSessionId());
+
+		const withoutTarget = await resolveSubagentLaunchContract({ agent: agentName, cwd: tempDir, task, context: "fresh", model: "mock/model", skill: false, output: false, artifacts: false, intercomBridge });
+		assert.equal(withoutTarget.ok, true);
+		if (!withoutTarget.ok) return;
+		assert.ok(withoutTarget.contract.diagnostics.some((diagnostic) => diagnostic.code === "host_required" && /orchestratorTarget/.test(diagnostic.message)));
+		const preflight = await resolveSubagentLaunchContract({ agent: agentName, cwd: tempDir, task, context: "fresh", model: "mock/model", skill: false, output: false, artifacts: false, intercomBridge, orchestratorTarget });
+		assert.equal(preflight.ok, true);
+		if (!preflight.ok) return;
+		assert.deepEqual(preflight.contract.intercomBridge, { active: true, mode: "always" });
+
+		mockPi.onCall({ output: "custom bridge" });
+		const request: SubagentDelegationRequest = {
+			requestId: `${agentName}-attempt`,
+			ownerRunId: "owner-bridge-template",
+			nodeId: agentName,
+			agent: agentName,
+			task,
+			context: "fresh",
+			cwd: tempDir,
+			model: "mock/model",
+			skill: false,
+			artifacts: false,
+			intercomBridge,
+			result: { kind: "text" },
+		};
+		const result = await makeExecutor([discovered]).executeDelegated(request.requestId, toSubagentDelegationExecutionParams(request), new AbortController().signal, undefined, ctx);
+		assert.equal(result.isError, undefined, result.content[0]?.text ?? "delegated execution failed");
+		assert.equal(result.details?.results?.[0]?.launchContractDigest, preflight.contract.launchContractDigest);
+		assert.notEqual(result.details?.results?.[0]?.launchContractDigest, withoutTarget.contract.launchContractDigest);
+		const childPrompt = readCall().systemPrompts.map((entry) => entry.text ?? (entry.path ? fs.readFileSync(entry.path, "utf-8") : "")).join("\n");
+		assert.ok(childPrompt.includes(`Custom bridge for ${orchestratorTarget}`), "child prompt should carry the session-named custom instruction");
 	});
 
 	it("does not inject a workflow child output without an aggregate or explicit output", { skip: !createSubagentExecutor ? "executor not importable" : undefined }, async () => {
